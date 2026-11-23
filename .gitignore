@@ -1,0 +1,33 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Modelos, pesos y datos descargados localmente
+models/
+data/
+outputs/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+
+# Variables de entorno y credenciales
+.env
+kaggle.json
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

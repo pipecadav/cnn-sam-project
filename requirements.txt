@@ -1,0 +1,35 @@
+# ==============================================================================
+# Dependencias del proyecto SAM 3 + CNN (Reconocimiento de Clima)
+# ==============================================================================
+# IMPORTANTE (Windows + GPU NVIDIA):
+# Instala primero PyTorch con soporte CUDA antes de instalar este archivo,
+# para evitar que pip instale la versión solo-CPU:
+#
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+#
+# Luego instala estas dependencias:
+#   pip install -r requirements.txt
+# ==============================================================================
+
+# Modelo SAM 3 (Sam3Model / Sam3Processor requieren transformers v5+)
+transformers>=5.0.0
+accelerate>=1.0.0
+huggingface-hub>=0.30.0
+safetensors>=0.4.5
+
+# Descarga automática del dataset de Kaggle
+kagglehub>=0.3.0
+
+# Procesamiento de imágenes, ciencia de datos y métricas
+Pillow>=10.0.0
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.5.0
+matplotlib>=3.9.0
+seaborn>=0.13.0
+tqdm>=4.66.0
+
+# Entorno Jupyter local
+jupyter>=1.1.0
+ipykernel>=6.29.0
+ipywidgets>=8.1.0
