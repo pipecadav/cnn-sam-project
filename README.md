@@ -155,10 +155,94 @@ Si escuchas estos términos en artículos o código sobre SAM, aquí tienes su t
 
 Este repositorio implementa un prototipo en Jupyter Notebook ([notebooks/weather_sam3_cnn.ipynb](notebooks/weather_sam3_cnn.ipynb)) para **determinar el clima actual a partir de una fotografía** usando el dataset [Weather Image Recognition (Kaggle)](https://www.kaggle.com/datasets/jehanbhathena/weather-dataset) (6,862 imágenes en 11 categorías climáticas).
 
-### ¿Cómo funciona nuestro prototipo?
-1. **SAM 3 Zero-Shot:** consulta 11 conceptos climáticos reutilizando `get_vision_features()` una sola vez por foto para obtener puntajes de presencia y **máscaras visuales explicativas** (resaltando nieve, rayos, arcoíris, rocío, niebla, etc.).
-2. **CNN (`ResNet18` con Transfer Learning):** se entrena en pocos minutos en GPU local para distinguir con alta precisión clases visualmente cercanas (`frost`, `glaze`, `rime`, `snow`).
-3. **Fusión Híbrida (CNN + SAM 3):** combina ambas señales para lograr alta precisión **manteniendo la explicabilidad visual** de SAM 3.
+---
+
+### Pipeline completo implementado
+
+El flujo completo del notebook combina las fortalezas de **SAM 3** (comprensión por texto y explicabilidad visual mediante máscaras) con una **CNN** (alta precisión en clases visualmente muy parecidas como `frost`, `glaze`, `rime` y `snow`):
+
+```mermaid
+flowchart TD
+    D["1. Dataset Kaggle (6,862 fotos, 11 climas)"] --> S["2. Split estratificado (70% Train / 15% Val / 15% Test)"]
+    S -->|"Val y Test"| SAM["3. Rama SAM 3 Zero-Shot (Concept Prompting)"]
+    S -->|"Train y Val"| CNN["4. Rama CNN (ResNet18 con Transfer Learning)"]
+    SAM -->|"Puntajes por clima + Máscaras"| CAL["5. Calibración en Val (alpha y temperatura T)"]
+    CNN -->|"Probabilidades Softmax"| CAL
+    CAL --> HYB["6. Fusión Híbrida (CNN + SAM 3)"]
+    HYB --> DEMO["7. Diagnóstico final (Clima + Evidencia resaltada + Top-3)"]
+```
+
+---
+
+### Paso a paso del Pipeline (incluyendo los pasos internos de SAM 3)
+
+#### Etapa 1: Datos y partición estratificada
+1. **Descarga automática:** `kagglehub` descarga `jehanbhathena/weather-dataset` en caché local y el notebook localiza automáticamente las 11 carpetas de clima.
+2. **División reproducible (`SEED = 42`):** separa los datos manteniendo la proporción de cada clima en **70% entrenamiento**, **15% validación** y **15% prueba**.
+3. **Subconjuntos ágiles para SAM 3:** crea `sam_val_df` (6 imágenes por clase) para calibrar la fusión y `sam_test_df` (10 imágenes por clase) para comparar modelos rápidamente (configurables a `None` para evaluar todo el dataset).
+
+---
+
+#### Etapa 2: ¿Qué ocurre por dentro de SAM 3 en cada imagen?
+
+Dentro de la función `analyze_image_with_sam3()`, cada fotografía atraviesa **6 pasos internos** diseñados para ser rápidos en GPU (`bfloat16`/`float16`) y evitar repetir cálculos innecesarios:
+
+```mermaid
+flowchart TD
+    I["Foto de entrada (RGB)"] --> P1["Paso 1: Preprocesamiento (Sam3Processor)"]
+    P1 -->|"Tensor pixel_values + tamaño original"| P2["Paso 2: Codificación visual única (get_vision_features)"]
+    P2 -->|"Mapa mental reutilizable (vision_embeds)"| P3["Paso 3: Bucle de 11 prompts climáticos (sam_model)"]
+    TXT["11 frases en inglés (ej. lightning bolt in sky, snow...)"] --> P3
+    P3 --> P4["Paso 4: Presence Head (sigmoid sobre presence_logits)"]
+    P3 --> P5["Paso 5: Post-procesado de máscaras (re-escalado + unión)"]
+    P4 -->|"presence_prob (peso 65%)"| P6["Paso 6: Puntaje combinado por clima"]
+    P5 -->|"max_mask_score (peso 35%) + área cubierta"| P6
+    P6 --> OUT["Vector de 11 puntajes + Máscara explicativa de cada clima"]
+```
+
+En detalle, cada paso hace lo siguiente:
+
+1. **Preprocesamiento (`Sam3Processor`):** convierte la imagen a formato RGB, ajusta su escala al formato que espera SAM 3 (`pixel_values`) y guarda sus dimensiones reales (`original_sizes`) para reconstruir luego las máscaras al tamaño original.
+2. **Codificación visual única (`model.get_vision_features`):** el *Perception Encoder* de SAM 3 analiza la imagen **una sola vez** y produce `vision_embeds` (el "mapa mental" visual de la foto). En vez de procesar la imagen 11 veces, este mapa se reutiliza para todos los climas.
+3. **Cruce Visión-Texto para los 11 climas (`sam_model`):** el notebook recorre un diccionario de 11 *prompts* descriptivos en inglés (por ejemplo, `"morning dew water droplets"`, `"thick fog and smog"`, `"lightning bolt in sky"`, `"rainbow in sky"`, `"snow"`). En cada iteración, el decodificador de SAM 3 cruza `vision_embeds` con el texto del clima actual.
+4. **Verificación de existencia (*Presence Head*):** toma `presence_logits` y aplica la función sigmoide para obtener `presence_prob` (de 0 a 1), que responde a la pregunta: *"¿Realmente existe este fenómeno en la fotografía?"*. Esto evita que el modelo invente recortes cuando el fenómeno no está presente.
+5. **Post-procesamiento y unión de máscaras (`post_process_instance_segmentation`):**
+   * Filtra las detecciones por confianza (`score_threshold = 0.25`) y convierte las probabilidades por píxel en siluetas binarias (`mask_threshold = 0.5`).
+   * Re-escala cada máscara al tamaño real de la foto.
+   * Une todas las instancias encontradas en una sola máscara (`union_mask`), guarda el puntaje más alto (`max_mask_score`) y calcula el porcentaje de la imagen cubierto (`area_ratio`).
+6. **Puntaje final de SAM 3 por clase:** combina la señal global de presencia con la confianza de las máscaras segmentadas:
+
+$$\text{score}_{\text{SAM3}} = 0.65 \cdot \text{presence\_prob} + 0.35 \cdot \text{max\_mask\_score}$$
+
+El resultado final de esta etapa es un vector de 11 puntajes (`score_vector`) y la máscara binaria de cada clima para explicar visualmente la decisión. Además, las matrices de puntajes se guardan en `outputs/` (`sam_val_scores.npy` y `sam_test_scores.npy`) para no repetir inferencia.
+
+---
+
+#### Etapa 3: Entrenamiento de la CNN especialista (`ResNet18`)
+1. **Gestión inteligente de VRAM:** antes de entrenar la CNN, `sam_model` se mueve temporalmente a CPU y se limpia la caché CUDA para que toda la memoria de la GPU quede libre.
+2. **Aumento de datos (*Data Augmentation*):** en entrenamiento se aplican recortes aleatorios (`224x224`), giros horizontales y ligeros cambios de brillo/contraste/saturación para mejorar la generalización.
+3. **Transfer Learning:** se parte de `ResNet18` preentrenada en ImageNet, se reemplaza la capa final para las 11 clases y se entrena durante **6 épocas** (`AdamW`, `CosineAnnealingLR`, `label_smoothing = 0.05` y precisión mixta).
+4. **Guardado del mejor modelo:** se conservan automáticamente en `models/weather_cnn_resnet18.pt` los pesos que logran mayor exactitud en validación.
+
+---
+
+#### Etapa 4: Calibración y Fusión Híbrida (CNN + SAM 3)
+1. **Conversión a probabilidades:** los puntajes de SAM 3 pasan por una función *softmax* con temperatura `T` para alinear su escala con las probabilidades de la CNN.
+2. **Búsqueda sin fuga de datos:** usando únicamente el conjunto de validación (`sam_val_df`), el notebook busca automáticamente la mejor combinación de temperatura `T` y peso $\alpha$ para la fusión:
+
+$$P_{\text{híbrido}} = (1 - \alpha) \cdot P_{\text{CNN}} + \alpha \cdot P_{\text{SAM3}}$$
+
+3. **Evaluación comparativa:** se comparan en las mismas imágenes de prueba los 3 sistemas (**SAM 3 Zero-Shot**, **CNN pura** e **Híbrido CNN + SAM 3**) mediante tabla de *Accuracy* / *Macro F1* y matrices de confusión lado a lado.
+
+---
+
+#### Etapa 5: Diagnóstico interactivo final (`diagnosticar_clima`)
+Al devolver `sam_model` a la GPU, la función `diagnosticar_clima(ruta_imagen)` permite pasar cualquier fotografía (del set de prueba o propia desde tu PC) y devuelve una visualización de **3 paneles**:
+1. **Imagen original.**
+2. **Evidencia visual de SAM 3:** superpone en rojo semitransparente la máscara del fenómeno climático ganador e indica qué porcentaje del área de la foto cubre.
+3. **Top-3 probabilidades:** gráfico comparativo con la confianza del sistema **Híbrido**, la **CNN** y **SAM 3**.
+
+---
 
 ### Guía rápida de instalación en local (Windows + GPU NVIDIA)
 
