@@ -13,14 +13,7 @@ __pycache__/
 .ipynb_checkpoints/
 
 # Modelos, pesos y datos descargados localmente
-models/
 data/
-outputs/
-*.pt
-*.pth
-*.ckpt
-*.safetensors
-*.onnx
 
 # Variables de entorno y credenciales
 .env
